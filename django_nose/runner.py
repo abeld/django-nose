@@ -191,9 +191,25 @@ class SkipDatabaseCreation(mysql.DatabaseCreation):
     def create_test_db(self, verbosity=1, autoclobber=False):
         # Notice that the DB supports transactions. Originally, this was done
         # in the method this overrides.
-        self.connection.features.confirm()
-        return self._get_test_db_name()
-
+        if hasattr(self.connection.features, 'confirm'):
+            self.connection.features.confirm()
+        else:
+            # django 1.2 support:
+            self.connection.features._confirmed = True
+            # Hopefully these are the right values for sqlite
+            self.connection.features.supports_transactions = True
+            self.connection.features.supports_stddev = False
+            self.connection.features.can_introspect_foreign_keys = True            
+        
+        if hasattr(self, '_get_test_db_name'):
+            return self._get_test_db_name()
+        else:
+            # django 1.2 support:
+            # (copy-paste-modify from django 1.3's sqlite backend)
+            test_database_name = self.connection.settings_dict['TEST_NAME']
+            if test_database_name and test_database_name != ':memory:':
+                return test_database_name
+            return ':memory:'
 
 class NoseTestSuiteRunner(BasicNoseRunner):
     """A runner that skips DB creation when possible
@@ -251,7 +267,16 @@ class NoseTestSuiteRunner(BasicNoseRunner):
         for alias in connections:
             connection = connections[alias]
             creation = connection.creation
-            test_db_name = creation._get_test_db_name()
+            if hasattr(creation, '_get_test_db_name'):
+                test_db_name = creation._get_test_db_name()
+            else:
+                # for django 1.2 support:
+                # (copy-paste-modify from django 1.3's sqlite backend)
+                test_database_name = creation.connection.settings_dict['TEST_NAME']
+                if test_database_name and test_database_name != ':memory:':
+                    test_db_name = test_database_name
+                test_db_name = ':memory:'
+                
 
             # Mess with the DB name so other things operate on a test DB
             # rather than the real one. This is done in create_test_db when
@@ -268,7 +293,18 @@ class NoseTestSuiteRunner(BasicNoseRunner):
                 cursor = connection.cursor()
                 for statement in sql_reset_sequences(connection):
                     cursor.execute(statement)
-                connection.commit_unless_managed()  # which it is
+
+                if hasattr(connection, 'commit_unless_managed'):
+                    connection.commit_unless_managed()  # which it is
+                else:
+                    # django 1.2 support:
+                    from django.db import transaction
+                    if not transaction.is_managed():
+                        connection._commit()
+                        transaction.clean_savepoints()
+                    else:
+                        transaction.set_dirty()
+                    
 
                 creation.__class__ = SkipDatabaseCreation
             else:
